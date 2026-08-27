@@ -1,8 +1,4 @@
-streamlit
-streamlit-webrtc
 ultralytics
-opencv-python-headless
-gTTS
-av
-numpy
+opencv-python
+pywin32
 torch
