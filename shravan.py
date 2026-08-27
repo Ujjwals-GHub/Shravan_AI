@@ -1,65 +1,55 @@
-#Importing necessary libraries
-import cv2                      #For video capture and image processing
-from ultralytics import YOLO    #For object detection using YOLO model
-import win32com.client          #For connecting Python to the Windows text-to-speech engine
-import time                     #For handling time-related functions
-import threading                #For threading
-import pythoncom                #For initializing COM in threads
+import os
+import av
+import cv2
+import time
+import tempfile
+import streamlit as st
+from ultralytics import YOLO
+from gtts import gTTS
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 
-# LOADING MODEL 
-model = YOLO(r"C:\Users\ujj.ext\Downloads\IITG-P1-main\IITG-P1-main\runs\detect\train6\weights\best.pt")
-cap = cv2.VideoCapture(0)
+# ==========================================
+# 1. PAGE CONFIGURATION & CACHED MODEL
+# ==========================================
+st.set_page_config(
+    page_title="Shravan — Blind Assistant",
+    page_icon="🦯",
+    layout="centered"
+)
 
-# MODEL PARAMETERS
-CONF_THRESHOLD = 0.5
-DELAY = 1
-DANGEROUS_OBJECTS = ["bed", "chair", "table", "laptop", "window", "door", "person"]
-last_spoken_time = 0
-last_message = ""
-frame_counter = 0 
+st.title("🦯 Shravan — Assistive Vision System")
+st.markdown("Real-time object detection and directional guidance for indoor navigation.")
 
-# Voice Engine Initialization
-def speak_async(text):
-    def run_speech():
-        pythoncom.CoInitialize() 
-        local_speaker = win32com.client.Dispatch("SAPI.SpVoice")
-        local_speaker.Rate = -1 
-        local_speaker.Speak(text)
-    
-    # Start the speech in a background thread
-    t = threading.Thread(target=run_speech, daemon=True)
-    t.start()
+@st.cache_resource
+def load_yolo_model():
+    model_path = "best.pt" if os.path.exists("best.pt") else "yolo11n.pt"
+    return YOLO(model_path)
 
-# MAIN LOOP to read video frames, perform object detection, and speak results
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+model = load_yolo_model()
 
-    frame_counter += 1
-    
-    # Only run the YOLO model and drawing logic on every 3rd frame
-    if frame_counter % 3 != 0:
-        cv2.imshow("SHRAVAN", frame)
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27 or key == ord('q') or key == ord('Q'):
-            break
-        continue 
+# ==========================================
+# 2. SETTINGS & CONSTANTS
+# ==========================================
+CONF_THRESHOLD = 0.50
+DANGEROUS_OBJECTS = {"bed", "chair", "table", "laptop", "window", "door", "person"}
 
-    # OBJECT DETECTION
-    results = model(frame)
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
+
+# ==========================================
+# 3. CORE DETECTION & SPATIAL LOGIC
+# ==========================================
+def process_detection(frame):
+    """Processes a single BGR frame, draws annotations, and returns warnings."""
     h, w, _ = frame.shape
+    results = model(frame, conf=CONF_THRESHOLD)
     messages = []
 
     for r in results:
         for box in r.boxes:
-
-            conf = float(box.conf[0])
-            if conf < CONF_THRESHOLD:
-                continue
-
-            cls = int(box.cls[0])
-            label = model.names[cls]
+            cls_id = int(box.cls[0])
+            label = model.names[cls_id]
 
             if label not in DANGEROUS_OBJECTS:
                 continue
@@ -67,7 +57,7 @@ while True:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             center_x = (x1 + x2) // 2
 
-            # Direction logic
+            # Spatial awareness: 3 vertical thirds
             if center_x < w // 3:
                 direction = "left"
             elif center_x > 2 * w // 3:
@@ -77,33 +67,79 @@ while True:
 
             messages.append(f"{label} {direction}")
 
-            # Draw bounding boxes and text
+            # Draw visual bounding box and label
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(frame, f"{label} {conf:.2f}",
-                        (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (0, 255, 0), 2)
+            cv2.putText(
+                frame,
+                f"{label} ({direction})",
+                (x1, max(y1 - 10, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 0),
+                2
+            )
 
-    # SPEAK LOGIC
-    current_time = time.time()
-    if messages:
-        unique_msg = ", ".join(sorted(set(messages)))
+    return frame, sorted(list(set(messages)))
 
-        if (unique_msg != last_message) or (current_time - last_spoken_time > DELAY):
-            print("[SPEAK]", unique_msg)
-            speak_async(unique_msg)  # Call the new threaded function
+# ==========================================
+# 4. WEBRTC VIDEO STREAMING PROCESSOR
+# ==========================================
+class VideoProcessor:
+    def __init__(self):
+        self.frame_counter = 0
 
-            last_message = unique_msg
-            last_spoken_time = current_time
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        img = frame.to_ndarray(format="bgr24")
+        self.frame_counter += 1
 
-    # ======================
-    # SHOW
-    # ======================
-    cv2.imshow("SHRAVAN", frame)
+        # Frame skipping optimization: process inference every 3rd frame
+        if self.frame_counter % 3 == 0:
+            annotated_img, _ = process_detection(img)
+            return av.VideoFrame.from_ndarray(annotated_img, format="bgr24")
 
-    key = cv2.waitKey(1) & 0xFF
-    if key == 27 or key == ord('q') or key == ord('Q'):
-        break
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-cap.release()
-cv2.destroyAllWindows()
+# ==========================================
+# 5. USER INTERFACE MODES
+# ==========================================
+mode = st.radio("Select Navigation Mode:", ["📸 Snapshot & Voice Alert", "🎥 Live WebRTC Stream"], horizontal=True)
+
+if mode == "🎥 Live WebRTC Stream":
+    st.info("Click **START** to initialize the live camera feed with directional bounding boxes.")
+    webrtc_streamer(
+        key="shravan-feed",
+        mode=WebRtcMode.SENDRECV,
+        rtc_configuration=RTC_CONFIGURATION,
+        video_processor_factory=VideoProcessor,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True
+    )
+
+elif mode == "📸 Snapshot & Voice Alert":
+    camera_img = st.camera_input("Capture live view:")
+    
+    if camera_img is not None:
+        # Convert file buffer to OpenCV BGR image
+        bytes_data = camera_img.getvalue()
+        cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
+
+        annotated_frame, detected_threats = process_detection(cv2_img)
+        rgb_preview = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+        
+        st.image(rgb_preview, caption="Detection Analysis", use_container_width=True)
+
+        if detected_threats:
+            warning_text = ", ".join(detected_threats)
+            st.error(f"⚠️ **Obstacles Detected:** {warning_text}")
+            
+            # Generate cross-platform voice feedback
+            tts = gTTS(text=warning_text, lang="en")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+                tts.save(fp.name)
+                st.audio(fp.name, format="audio/mp3", autoplay=True)
+        else:
+            st.success("✅ **Path Clear:** No immediate obstacles detected.")
+            tts = gTTS(text="Path clear. No obstacles ahead.", lang="en")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+                tts.save(fp.name)
+                st.audio(fp.name, format="audio/mp3", autoplay=True)
