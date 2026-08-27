@@ -7,6 +7,7 @@ import streamlit as st
 from ultralytics import YOLO
 from gtts import gTTS
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+import numpy as np
 
 # ==========================================
 # 1. PAGE CONFIGURATION & CACHED MODEL
