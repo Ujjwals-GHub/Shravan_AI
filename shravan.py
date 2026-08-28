@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("🦯 Shravan — Assistive Vision System")
-st.markdown("Real-time object detection and directional guidance for indoor navigation.")
+st.markdown("Real-time object detection and directional guidance for indoor navigation. For best result use: Chrome/Edge/Firefox")
 
 @st.cache_resource
 def load_yolo_model():
