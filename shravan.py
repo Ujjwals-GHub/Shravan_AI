@@ -2,12 +2,13 @@ import os
 import av
 import cv2
 import time
+import base64
 import tempfile
+import numpy as np
 import streamlit as st
 from ultralytics import YOLO
 from gtts import gTTS
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
-import numpy as np
 
 # ==========================================
 # 1. PAGE CONFIGURATION & CACHED MODEL
@@ -23,6 +24,7 @@ st.markdown("Real-time object detection and directional guidance for indoor navi
 
 @st.cache_resource
 def load_yolo_model():
+    # Looks for your custom best.pt, falls back to nano if missing
     model_path = "best.pt" if os.path.exists("best.pt") else "yolo11n.pt"
     return YOLO(model_path)
 
@@ -34,6 +36,7 @@ model = load_yolo_model()
 CONF_THRESHOLD = 0.50
 DANGEROUS_OBJECTS = {"bed", "chair", "table", "laptop", "window", "door", "person"}
 
+# Free Google STUN server for WebRTC
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
@@ -88,14 +91,16 @@ def process_detection(frame):
 class VideoProcessor:
     def __init__(self):
         self.frame_counter = 0
+        self.detected_threats = []
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
         self.frame_counter += 1
 
-        # Frame skipping optimization: process inference every 3rd frame
+        # Process inference every 3rd frame to reduce CPU load
         if self.frame_counter % 3 == 0:
-            annotated_img, _ = process_detection(img)
+            annotated_img, threats = process_detection(img)
+            self.detected_threats = threats 
             return av.VideoFrame.from_ndarray(annotated_img, format="bgr24")
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
@@ -107,7 +112,8 @@ mode = st.radio("Select Navigation Mode:", ["📸 Snapshot & Voice Alert", "🎥
 
 if mode == "🎥 Live WebRTC Stream":
     st.info("Click **START** to initialize the live camera feed with directional bounding boxes.")
-    webrtc_streamer(
+    
+    ctx = webrtc_streamer(
         key="shravan-feed",
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=RTC_CONFIGURATION,
@@ -115,12 +121,53 @@ if mode == "🎥 Live WebRTC Stream":
         media_stream_constraints={"video": True, "audio": False},
         async_processing=True
     )
+    
+    # ----------------------------------------------------
+    # POLLING LOOP FOR LIVE AUDIO FEEDBACK
+    # ----------------------------------------------------
+    if ctx.state.playing:
+        status_text = st.empty()
+        audio_placeholder = st.empty()
+        
+        last_message = ""
+        last_spoken_time = 0
+        tts_cache = {}  
+        DELAY = 2.0     
+        
+        while True:
+            if ctx.video_processor:
+                current_threats = ctx.video_processor.detected_threats
+                
+                if current_threats:
+                    unique_msg = ", ".join(current_threats)
+                    status_text.error(f"⚠️ **Obstacles Detected:** {unique_msg}")
+                    
+                    current_time = time.time()
+                    
+                    if (unique_msg != last_message) or (current_time - last_spoken_time > DELAY):
+                        if unique_msg not in tts_cache:
+                            tts = gTTS(text=unique_msg, lang="en")
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+                                tts.save(fp.name)
+                                with open(fp.name, "rb") as f:
+                                    tts_cache[unique_msg] = base64.b64encode(f.read()).decode()
+                        
+                        b64 = tts_cache[unique_msg]
+                        audio_html = f'<audio autoplay="true"><source src="data:audio/mp3;base64,{b64}" type="audio/mp3"></audio>'
+                        audio_placeholder.markdown(audio_html, unsafe_allow_html=True)
+                        
+                        last_message = unique_msg
+                        last_spoken_time = current_time
+                else:
+                    status_text.success("✅ **Path Clear:** No immediate obstacles detected.")
+                    last_message = ""
+                    
+            time.sleep(0.5) 
 
 elif mode == "📸 Snapshot & Voice Alert":
     camera_img = st.camera_input("Capture live view:")
     
     if camera_img is not None:
-        # Convert file buffer to OpenCV BGR image
         bytes_data = camera_img.getvalue()
         cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
 
@@ -133,7 +180,6 @@ elif mode == "📸 Snapshot & Voice Alert":
             warning_text = ", ".join(detected_threats)
             st.error(f"⚠️ **Obstacles Detected:** {warning_text}")
             
-            # Generate cross-platform voice feedback
             tts = gTTS(text=warning_text, lang="en")
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
                 tts.save(fp.name)
