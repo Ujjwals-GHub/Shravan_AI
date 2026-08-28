@@ -153,14 +153,19 @@ if mode == "🎥 Live WebRTC Stream":
                                     tts_cache[unique_msg] = base64.b64encode(f.read()).decode()
                         
                         b64 = tts_cache[unique_msg]
-                        audio_html = f'<audio autoplay="true"><source src="data:audio/mp3;base64,{b64}" type="audio/mp3"></audio>'
+                        
+                        # 1. Clear the previous audio player
+                        audio_placeholder.empty()
+                        
+                        # 2. Inject a unique hidden ID (current_time) so the browser is forced to autoplay
+                        audio_html = f'<div id="audio-{current_time}"><audio autoplay="true"><source src="data:audio/mp3;base64,{b64}" type="audio/mp3"></audio></div>'
                         audio_placeholder.markdown(audio_html, unsafe_allow_html=True)
                         
                         last_message = unique_msg
                         last_spoken_time = current_time
                 else:
                     status_text.success("✅ **Path Clear:** No immediate obstacles detected.")
-                    last_message = ""
+                    # Do NOT clear last_message here. Keeping it prevents spam if the camera flickers.
                     
             time.sleep(0.5) 
 
